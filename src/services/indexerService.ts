@@ -1,9 +1,9 @@
 import EventLog from '../models/EventLog';
 import Delivery from '../models/Delivery';
-import { sorobanRpcClient } from '../config/stellar';
 import logger from '../config/logger';
-import { webSocketService } from './webSocketService';
-
+import { emitDeliveryStatusUpdated } from '../sockets/connectionHandler';
+import type { ISorobanRpcClient } from './providers/sorobanRpcClient';
+import { defaultSorobanRpcClient } from './providers/adapters';
 export interface IndexerStatusData {
   eventType: string;
   contractId: string;
@@ -20,19 +20,25 @@ export interface DeliveryStatusUpdatedEvent {
 }
 
 export class IndexerService {
+  private readonly rpcClient: ISorobanRpcClient;
+
+  constructor(rpcClient: ISorobanRpcClient = defaultSorobanRpcClient) {
+    this.rpcClient = rpcClient;
+  }
+
   public async getIndexerStatus(): Promise<IndexerStatusData[]> {
     try {
-      const currentLedgerResponse = await sorobanRpcClient.getLatestLedger();
+      const currentLedgerResponse = await this.rpcClient.getLatestLedger();
       const currentLedger = currentLedgerResponse.sequence;
       const logs = await EventLog.find({}).lean();
       return logs.map((log) => {
-        const lag = Math.max(0, currentLedger - log.lastProcessedLedger);
+        const lastProcessedLedger = Number(log.ledgerSequence ?? 0);
         return {
           eventType: log.eventType,
-          contractId: log.contractId,
-          lastProcessedLedger: log.lastProcessedLedger,
+          contractId: log.contractId ?? '',
+          lastProcessedLedger,
           currentLedger,
-          lag,
+          lag: Math.max(0, currentLedger - lastProcessedLedger),
           updatedAt: log.updatedAt,
         };
       });
@@ -60,7 +66,13 @@ export class IndexerService {
         );
         return;
       }
-      await webSocketService.notifyDeliveryStatusChange(updatedDelivery);
+      // Push the transition to any connected realtime clients (no-op when the
+      // socket namespace has not been initialised, e.g. in tests).
+      emitDeliveryStatusUpdated(deliveryId, {
+        contractId,
+        deliveryId,
+        status: newStatus,
+      });
       logger.info(
         `[IndexerService] Delivery ${deliveryId} status updated to ${newStatus} on contract ${contractId}`,
       );

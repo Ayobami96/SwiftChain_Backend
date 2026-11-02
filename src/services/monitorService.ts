@@ -71,9 +71,12 @@ export const recordProcessedLedger = async (ledgerSequence: number): Promise<voi
 
 // ─── Webhook notification ─────────────────────────────────────────────────────
 
-async function notifyWebhook(payload: IndexerLagCheckResult): Promise<{ error?: string }> {
+async function notifyWebhook(
+  url: string,
+  payload: IndexerLagCheckResult,
+): Promise<{ error?: string }> {
   try {
-    await axios.post(env.INDEXER_LAG_WEBHOOK_URL, {
+    await axios.post(url, {
       event: 'indexer_lag_alert',
       ...payload,
     });
@@ -95,7 +98,12 @@ async function notifyWebhook(payload: IndexerLagCheckResult): Promise<{ error?: 
 export const checkIndexerLag = async (): Promise<IndexerLagCheckResult> => {
   const checkedAt = new Date().toISOString();
   const status = await getOrCreateIndexerStatus();
-  const networkLedger = await sorobanService.getLatestLedger();
+  const rawNetworkLedger = await sorobanService.getLatestLedger();
+
+  // Degraded RPC answers carry no ledger information — treat them as "no
+  // forward progress observed" rather than crashing the monitor loop.
+  const networkLedger =
+    typeof rawNetworkLedger === 'number' ? rawNetworkLedger : status.lastProcessedLedger;
 
   const lagLedgers = Math.max(0, networkLedger - status.lastProcessedLedger);
   const thresholdLedgers = env.INDEXER_LAG_ALERT_THRESHOLD;
@@ -130,7 +138,7 @@ export const checkIndexerLag = async (): Promise<IndexerLagCheckResult> => {
   let webhookError: string | undefined;
 
   if (webhookConfigured) {
-    const outcome = await notifyWebhook(result);
+    const outcome = await notifyWebhook(env.INDEXER_LAG_WEBHOOK_URL, result);
     webhookNotified = !outcome.error;
     webhookError = outcome.error;
 
@@ -151,6 +159,38 @@ export const checkIndexerLag = async (): Promise<IndexerLagCheckResult> => {
   });
 
   return result;
+};
+
+/**
+ * Read-only indexer lag snapshot for scrape-based monitoring.
+ *
+ * Unlike checkIndexerLag(), this helper does not create checkpoints, persist
+ * alerts, or send webhooks, so frequent metrics scrapes have no write side effects.
+ */
+export interface IndexerLagSnapshot {
+  network: string;
+  processedLedger: number;
+  networkLedger: number;
+  lagLedgers: number;
+}
+
+export const getIndexerLagSnapshot = async (): Promise<IndexerLagSnapshot | null> => {
+  const status = await IndexerStatus.findOne({ network: stellarConfig.network });
+  if (!status) {
+    return null;
+  }
+
+  const rawNetworkLedger = await sorobanService.getLatestLedger();
+  if (typeof rawNetworkLedger !== 'number') {
+    return null;
+  }
+
+  return {
+    network: status.network,
+    processedLedger: status.lastProcessedLedger,
+    networkLedger: rawNetworkLedger,
+    lagLedgers: Math.max(0, rawNetworkLedger - status.lastProcessedLedger),
+  };
 };
 
 // ─── Alert history ─────────────────────────────────────────────────────────────

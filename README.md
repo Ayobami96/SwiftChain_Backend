@@ -108,28 +108,49 @@ The backend serves as the central hub connecting the frontend, database, and blo
 
 ## 📡 API Endpoints
 
+All endpoints are versioned under the `/api` prefix (e.g. `/api/v1/...`). The list below
+mirrors what is mounted in `src/routes/index.ts`.
+
 ### Authentication
 
-- `POST /auth/register` - Register a new user/driver.
-- `POST /auth/login` - Authenticate and retrieve token.
+- `POST /api/v1/auth/register` - Register a new user/driver.
+- `POST /api/v1/auth/login` - Authenticate and retrieve token.
+
+### Merchant Onboarding
+
+- `POST /api/v1/onboarding/merchant` - Register onboarding intent with business metadata, the
+  treasury Stellar address, owner contact details and a webhook URL. Returns a challenge message;
+  nothing is created yet.
+- `PUT /api/v1/onboarding/merchant/wallet` - Submit `{ onboardingId, signature, password }`, where
+  `signature` is the treasury key's base64 Ed25519 signature of the challenge (raw or SEP-53). On
+  success the enterprise owner account, the fleet and a default webhook subscription for every
+  delivery milestone are created; the response carries the owner's token and the one-time webhook
+  signing secret.
 
 ### Deliveries
 
-- `POST /deliveries` - Create a new delivery request.
-- `GET /deliveries` - Retrieve a list of deliveries (with filters).
-- `PUT /deliveries/:id/assign` - Assign a driver to a delivery.
-
-### Shipments
-
-- `POST /shipments` - Create a shipment record.
-- `GET /shipments` - Get shipment details.
+- `POST /api/v1/deliveries` - Create a new delivery request.
+- `GET /api/v1/deliveries` - Retrieve a list of deliveries (with filters).
+- `GET|PATCH /api/v1/deliveries/:id` - Retrieve or update a delivery.
+- `PATCH /api/v1/deliveries/:id/assign-driver` - Assign a driver (admin only; requires a
+  fully initialised escrow).
+- `PATCH /api/v1/deliveries/:id/archive` / `.../restore` - Soft-delete / restore.
+- `GET /api/v1/deliveries/:id/qrcode` - Handoff verification QR code.
+- `GET /api/v1/deliveries/:id/eta` - Estimated arrival time.
+- `PUT /api/v1/deliveries/:id/status` - Advance the delivery status (driver/admin).
 
 ### Escrow
 
 - `GET /api/v1/escrow/delivery/:id` - Fetch the escrow record (locking state, amount, asset,
   contract id, on-chain transaction hashes) associated with a delivery. `:id` accepts either the
   delivery `_id` or its business `deliveryId`.
-  
+- `GET /api/v1/escrow/contract/:contractId` - Fetch the escrow record by Soroban contract id.
+- `POST /api/v1/escrow/fund` - Record an on-chain `escrow_funded` event (idempotent).
+- `POST /api/v1/escrow/sync` - Manually trigger an `escrow_funded` indexer poll.
+- `POST /api/v1/escrow/release` - Release an escrow (Redlock-protected).
+- `GET /api/v1/admin/escrows/flagged` - List escrows flagged as expired (admin only).
+- `PATCH /api/v1/admin/escrows/:id/resolve` - Resolve a flagged escrow (admin only).
+
 ### Transactions
 
 - `POST /api/v1/transactions/escrow-lock` - Build the unsigned, simulation-prepared Soroban XDR
@@ -137,10 +158,27 @@ The backend serves as the central hub connecting the frontend, database, and blo
   contract target are resolved server-side from MongoDB and the deployment configuration. The
   returned base64 envelope is signed and submitted by the client wallet — the backend never holds
   secret keys.
+- `POST /api/v1/transactions/submit` - Submit a signed escrow-lock XDR with automatic
+  `tx_bad_seq` retry.
+
+### Monitoring
+
+- `GET /api/v1/monitor/indexer-lag` - On-demand indexer-lag check against the live ledger
+  (admin only).
+- `GET /api/v1/monitor/indexer-lag/alerts` - Recent persisted indexer-lag alerts (admin only).
+- `GET /api/v1/health` - Liveness/readiness probe with Soroban RPC health check.
+
+### Indexer
+
+- `GET /api/v1/indexer/escrows/:escrowId` - Escrow status from the database.
+- `POST /api/v1/indexer/escrows/sync/released` - Manually sync `escrow_released` events.
+- `POST /api/v1/indexer/escrows/sync/refunded` - Manually sync `escrow_refunded` events.
+- `POST /api/v1/indexer/delivery-created` - Process a `delivery_created` event (indexer worker).
 
 ### Uploads
 
-- `POST /uploads` - Upload proof of delivery or documents.
+- `POST /api/v1/uploads/evidence` - Upload dispute evidence media (authenticated).
+- `GET /api/v1/uploads/evidence/:disputeId` - List evidence for a dispute (authenticated).
 
 ---
 
@@ -186,22 +224,28 @@ metadata:
 
 ## 🗺 Development Roadmap
 
+> **Status (October 2026):** Phase 1 and Phase 2 are fully implemented — every item below is
+> checked off and links to the code that implements it. Phase 3 and Phase 4 remain future work.
+
 ### Phase 1 — MVP (Minimal Logistics Backend)
 
-- [ ] Authentication System (Register/Login/JWT).
-- [ ] Core Delivery CRUD Endpoints.
-- [ ] Driver Assignment Logic.
-- [ ] MongoDB Schema Design.
-- [ ] Basic Validation & Error Handling.
+- [x] Authentication System (register/login, JWT access + refresh tokens) — **Implemented** in `src/controllers/authController.ts`, `src/services/authService.ts`, `src/routes/authRoutes.ts`.
+- [x] Core Delivery CRUD Endpoints (create, list, get, update, plus archive/restore) — **Implemented** in `src/controllers/delivery.controller.ts`, `src/services/delivery.service.ts`, `src/routes/delivery.routes.ts`.
+- [x] Driver Assignment Logic (escrow-gated assignment and nearest-driver auto-assignment) — **Implemented** in `DeliveryService.assignDriver` (`src/services/delivery.service.ts`), `src/services/assignmentService.ts`, `src/routes/assignmentRoutes.ts`.
+- [x] MongoDB Schema Design (Mongoose models for users, deliveries, escrow, disputes, events, notifications, fleets and more) — **Implemented** across `src/models/`.
+- [x] Basic Validation & Error Handling (Zod request validation, central error handler, response envelope) — **Implemented** in `src/validators/`, `src/middleware/validate.ts`, `src/middleware/errorHandler.ts`, `src/utils/responseWrapper.ts`.
 
 ### Phase 2 — Escrow Payment Integration
 
-- [ ] Stellar Payment Service Integration.
-- [ ] Escrow Payment Initiation Endpoints.
-- [ ] Transaction Tracking.
-- [ ] Payment Verification Webhooks.
+- [x] Stellar Payment Service Integration (testnet/mainnet signing, Soroban RPC with circuit breakers) — **Implemented** in `src/services/stellarService.ts`, `src/blockchain/`.
+- [x] Escrow Payment Initiation Endpoints (`POST /api/v1/escrow/fund`, escrow/lock lookups, funding-window enforcement) — **Implemented** in `src/routes/escrow.routes.ts`, `src/controllers/escrow.controller.ts`, `src/services/escrow.service.ts`.
+- [x] Transaction Tracking (append-only delivery milestone log plus on-chain transaction records) — **Implemented** in `src/models/DeliveryEvent.ts`, `src/models/EventLog.ts`, `src/services/transactionService.ts`, exposed through `src/routes/transactionRoutes.ts` and `src/routes/deliveryEventRoutes.ts`.
+- [x] Payment Verification Webhooks (subscriptions, signed dispatch, retries and DLQ) — **Implemented** in `src/services/webhookService.ts`, `src/routes/webhookRoutes.ts`, `src/jobs/webhookRetryJob.ts`, `src/services/dlqService.ts`.
 
 ### Phase 3 — Smart Contract Integration
+
+> **Status: future work — not started as a milestone.** No item below is checked off yet;
+> `src/blockchain/` and `src/indexer/` only provide partial foundations.
 
 - [ ] Soroban Smart Contract Interaction Layer.
 - [ ] Blockchain Event Listeners.
@@ -209,6 +253,10 @@ metadata:
 - [ ] Delivery Proof Validation on Chain.
 
 ### Phase 4 — Platform Scaling
+
+> **Status: future work — not started as a milestone.** No item below is checked off yet, even
+> though early foundations exist (e.g. `src/services/fleetService.ts`,
+> `src/services/driverRatingService.ts`, `src/services/dashboardService.ts`).
 
 - [ ] Logistics Analytics & Reporting APIs.
 - [ ] Fleet Management Features.
@@ -328,3 +376,8 @@ linked PR 5,4,6
 ## 📄 License
 
 This project is licensed under the ISC License.
+
+
+## Prometheus metrics endpoint
+
+Operational metrics are available at `GET /metrics` and `GET /api/v1/metrics` when `ENABLE_METRICS=true`. The endpoint is disabled by default and requires a valid admin Bearer token when enabled. See [Prometheus metrics and operations guidance](docs/prometheus-metrics.md) for metric names, scrape setup, and alert recommendations.

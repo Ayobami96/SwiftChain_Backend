@@ -1,5 +1,5 @@
 import httpStatus from 'http-status-codes';
-import { Types } from 'mongoose';
+import { Types, SortOrder, FilterQuery } from 'mongoose';
 import logger from '../config/logger';
 import { AppError } from '../utils/AppError';
 import { Delivery, DeliveryStatus, IDelivery } from '../models/Delivery';
@@ -58,6 +58,11 @@ const EVENT_COPY: Record<NotificationEvent, { title: string; body: (ref: string)
   [NotificationEvent.DELIVERY_CANCELLED]: {
     title: 'Delivery cancelled',
     body: (ref) => `Delivery ${ref} has been cancelled.`,
+  },
+  [NotificationEvent.MERCHANT_ONBOARDED]: {
+    title: 'Welcome to SwiftChain',
+    body: (ref) =>
+      `Onboarding for ${ref} is complete. You can now create escrow-funded deliveries.`,
   },
 };
 
@@ -158,6 +163,25 @@ export class NotificationService {
   }
 
   /**
+   * Tell a newly onboarded merchant owner their account is active. Like every
+   * dispatch, a push failure is recorded rather than thrown.
+   */
+  async notifyMerchantOnboarded(
+    ownerId: string,
+    fleet: { id: string; name: string },
+  ): Promise<INotification | null> {
+    const event = NotificationEvent.MERCHANT_ONBOARDED;
+    const copy = EVENT_COPY[event];
+    return this.dispatch({
+      userId: ownerId,
+      event,
+      title: copy.title,
+      body: copy.body(fleet.name),
+      data: { event, fleetId: fleet.id },
+    });
+  }
+
+  /**
    * Handle a `delivery_status_updated` event emitted by the smart contract.
    *
    * Applies the on-chain status to the stored delivery and triggers the
@@ -171,14 +195,9 @@ export class NotificationService {
       throw new AppError('Invalid delivery ID', httpStatus.BAD_REQUEST);
     }
 
-    const normalizedStatus = Object.values(DeliveryStatus).find(
-      (value) => value === event.status,
-    );
+    const normalizedStatus = Object.values(DeliveryStatus).find((value) => value === event.status);
     if (!normalizedStatus) {
-      throw new AppError(
-        `Unknown delivery status '${event.status}'`,
-        httpStatus.BAD_REQUEST,
-      );
+      throw new AppError(`Unknown delivery status '${event.status}'`, httpStatus.BAD_REQUEST);
     }
 
     const updated = await Delivery.findByIdAndUpdate(
@@ -210,8 +229,9 @@ export class NotificationService {
       this.websocketNotifier(delivery, status, transactionHash);
     } catch (error) {
       logger.error(
-        `[NotificationService] WebSocket notification failed for delivery=${String(delivery._id)}: ` +
-          (error instanceof Error ? error.message : 'Unknown error'),
+        `[NotificationService] WebSocket notification failed for delivery=${String(
+          delivery._id,
+        )}: ` + (error instanceof Error ? error.message : 'Unknown error'),
       );
     }
   }
@@ -392,10 +412,31 @@ export class NotificationService {
     return preference;
   }
 
-  /** One page of a user's notification history. */
-  async listForUser(userId: string, page = 1, limit = 20): Promise<Page<INotification>> {
+  /**
+   * One page of a user's notification history.
+   *
+   * `filter`/`sort` come from the shared query middleware whitelist; the
+   * user scoping is applied here so a client can never read another user's
+   * notifications, whatever the query string contains.
+   */
+  async listForUser(
+    userId: string,
+    options: {
+      filter?: Record<string, unknown>;
+      page?: number;
+      limit?: number;
+      sort?: Record<string, SortOrder>;
+    } = {},
+  ): Promise<Page<INotification>> {
     this.assertValidUserId(userId);
-    return this.notificationRepository.listForUser(userId, page, limit);
+    const { filter = {}, page = 1, limit = 20, sort = { createdAt: -1 } } = options;
+    return this.notificationRepository.listForUser(
+      userId,
+      { ...filter, user: userId } as FilterQuery<INotification>,
+      page,
+      limit,
+      sort,
+    );
   }
 
   /** Whether the configured push provider can currently send. */

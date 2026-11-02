@@ -1,8 +1,9 @@
 import { Router } from 'express';
 import { escrowController } from '../controllers/escrow.controller';
-import { validateRequest } from '../middlewares/validateRequest';
+import validate from '../middleware/validate';
 import { requireIdempotencyKey } from '../middlewares/idempotency';
 import { fundEscrowBodySchema } from '../validators/escrowValidator';
+import authenticate from '../middleware/authenticate';
 
 /**
  * Escrow routes.
@@ -80,12 +81,16 @@ const router = Router();
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
+router.use(authenticate);
+
 router.post(
   '/fund',
   requireIdempotencyKey,
-  validateRequest({ body: fundEscrowBodySchema }),
+  validate({ body: fundEscrowBodySchema }),
   escrowController.fund.bind(escrowController),
 );
+
+// Every escrow endpoint, including fund, requires a valid JWT.
 
 router.get('/delivery/:deliveryId', escrowController.getByDelivery.bind(escrowController));
 router.get('/contract/:contractId', escrowController.getByContract.bind(escrowController));

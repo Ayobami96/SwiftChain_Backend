@@ -3,13 +3,110 @@ import authenticate from '../middleware/authenticate';
 import requireRole from '../middleware/requireRole';
 import { suspendUser, getDisputes } from '../controllers/adminController';
 import { getDashboardMetrics } from '../controllers/dashboardController';
+import { dlqController } from '../controllers/dlqController';
+import eventLogController from '../controllers/eventLogController';
 import { UserRole } from '../interfaces/IUser';
+import { buildQueryOptions } from '../middlewares/queryMiddleware';
+import { QueryFeatureConfig } from '../types/query';
+import { searchAdminDrivers } from '../controllers/adminDriverSearchController';
 
 const router = Router();
+
+const adminDriverQueryConfig: QueryFeatureConfig = {
+  sortableFields: [
+    'createdAt',
+    'updatedAt',
+    'reputationPoints',
+    'rating',
+    'totalDeliveries',
+    'completedDeliveries',
+    'tier',
+  ],
+  filterableFields: {
+    tier: 'string',
+    minVehicleCapacity: 'number',
+    minReputation: 'number',
+    maxReputation: 'number',
+    availability: 'string',
+    minCompletedDeliveries: 'number',
+    maxCompletedDeliveries: 'number',
+    minTotalDeliveries: 'number',
+    maxTotalDeliveries: 'number',
+  },
+  defaultSort: { createdAt: -1 },
+  defaultLimit: 20,
+  maxLimit: 100,
+};
 
 // All admin routes require a valid JWT AND the admin role
 router.use(authenticate);
 router.use(requireRole(UserRole.ADMIN));
+
+/**
+ * @openapi
+ * /v1/admin/drivers:
+ *   get:
+ *     tags: [Admin]
+ *     summary: Search and filter drivers
+ *     description: >
+ *       Admin-only paginated search over driver profiles and public user fields.
+ *       Password hashes are never returned.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: search
+ *         schema: { type: string, maxLength: 100 }
+ *         description: Case-insensitive search across first name, last name, combined full name, and email.
+ *       - in: query
+ *         name: tier
+ *         schema: { type: string, enum: [bronze, silver, gold, platinum] }
+ *       - in: query
+ *         name: minVehicleCapacity
+ *         schema: { type: number, minimum: 0 }
+ *       - in: query
+ *         name: minReputation
+ *         schema: { type: number, minimum: 0 }
+ *       - in: query
+ *         name: maxReputation
+ *         schema: { type: number, minimum: 0 }
+ *       - in: query
+ *         name: availability
+ *         schema: { type: string, enum: [available, unavailable, online, offline, on_delivery] }
+ *       - in: query
+ *         name: minCompletedDeliveries
+ *         schema: { type: integer, minimum: 0 }
+ *       - in: query
+ *         name: maxCompletedDeliveries
+ *         schema: { type: integer, minimum: 0 }
+ *       - in: query
+ *         name: minTotalDeliveries
+ *         schema: { type: integer, minimum: 0 }
+ *       - in: query
+ *         name: maxTotalDeliveries
+ *         schema: { type: integer, minimum: 0 }
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, minimum: 1, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+ *       - in: query
+ *         name: sort
+ *         schema: { type: string, example: -reputationPoints,createdAt }
+ *     responses:
+ *       200:
+ *         description: Paginated driver results with safe flattened DTOs.
+ *       400:
+ *         description: Invalid query parameters.
+ *       401:
+ *         description: Authentication required.
+ *       403:
+ *         description: Admin role required.
+ */
+router.get('/drivers', buildQueryOptions(adminDriverQueryConfig), searchAdminDrivers);
+
+
 
 /**
  * @openapi
@@ -263,5 +360,78 @@ router.get('/dlq', dlqController.getDlqEntries);
  *         description: Successfully retried the DLQ entry
  */
 router.post('/dlq/:id/retry', dlqController.retryDlqEntry);
+
+/**
+ * @openapi
+ * /v1/admin/eventlog/failed:
+ *   get:
+ *     tags: [Admin]
+ *     summary: List failed indexer events with their retry state
+ *     description: >
+ *       Admin-only. Returns EventLog entries in the `failed` status, newest failure
+ *       first, including `retries`, `lastError`, `nextRetryAt` and `deadLetteredAt`.
+ *       Entries with `deadLetteredAt` set have exhausted their retries and were sent
+ *       to the DLQ; the retry job no longer picks them up.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *         description: Items per page (max 100)
+ *     responses:
+ *       200:
+ *         description: Failed events retrieved
+ *       401:
+ *         $ref: '#/components/responses/Unauthorized'
+ *       403:
+ *         description: Requester is not an admin
+ */
+router.get('/eventlog/failed', eventLogController.getFailedEvents.bind(eventLogController));
+
+/**
+ * @openapi
+ * /v1/admin/eventlog/{id}/retry:
+ *   post:
+ *     tags: [Admin]
+ *     summary: Retry a failed indexer event now
+ *     description: >
+ *       Admin-only and audit-logged. Re-runs the event through the event poller's
+ *       dispatch path, ignoring its backoff window. `outcome` is `processed` on
+ *       success, `scheduled` when it failed with attempts left, or `dead_lettered`
+ *       when retries are exhausted and the event was escalated to the DLQ.
+ *       Dead-lettered entries can be retried here as well.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Retry attempted; see `outcome`
+ *       400:
+ *         description: Invalid event log id
+ *       401:
+ *         $ref: '#/components/responses/Unauthorized'
+ *       403:
+ *         description: Requester is not an admin
+ *       404:
+ *         $ref: '#/components/responses/NotFound'
+ *       409:
+ *         description: Entry is not failed, or is already being retried
+ *       503:
+ *         description: No escrow contract is configured to replay against
+ */
+router.post('/eventlog/:id/retry', eventLogController.retryFailedEvent.bind(eventLogController));
 
 export default router;

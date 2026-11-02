@@ -1,13 +1,37 @@
-import { Types } from 'mongoose';
+import { Types, SortOrder } from 'mongoose';
+import { Asset, validateAsset } from './currencyService';
 import httpStatus from 'http-status-codes';
 import Delivery, { IDelivery, DeliveryStatus, ILocation, IPackage } from '../models/Delivery';
-import Escrow, { EscrowLockStatus } from '../models/Escrow';
+import Escrow, { EscrowStatus } from '../models/Escrow';
 import { AppError } from '../utils/AppError';
 import logger from '../config/logger';
 import { deliveryRepository } from '../repositories/DeliveryRepository';
+import env from '../config/env';
 import { notificationService } from './notificationService';
 import { webhookService } from './webhookService';
 import { proofOfDeliveryService } from './proofOfDeliveryService';
+import { deliveryEventRepository } from '../repositories/DeliveryEventRepository';
+import {
+  DeliveryMilestone,
+  IDeliveryEvent,
+  IMilestoneActor,
+  MILESTONE_BY_STATUS,
+} from '../models/DeliveryEvent';
+import { emitDeliveryStatusUpdated } from '../sockets/connectionHandler';
+
+/** Describes the milestone being raised for a delivery that has just committed a status change. */
+export interface MilestoneInput {
+  name: DeliveryMilestone;
+  /** Status the delivery left; `null` for the initial `created` milestone. */
+  fromStatus: DeliveryStatus | null;
+  payload?: Record<string, unknown>;
+}
+
+/** Authenticated caller asking to read a delivery's milestone log. */
+export interface MilestoneRequester {
+  id: string;
+  role: string;
+}
 
 export interface CreateDeliveryInput {
   trackingNumber: string;
@@ -20,8 +44,16 @@ export interface CreateDeliveryInput {
   dropoff: ILocation;
   package: IPackage;
   deliveryFee: number;
+  deliveryFeeAsset?: Asset;
   escrowAmount: number;
+  escrowAsset?: Asset;
   notes?: string;
+  /**
+   * Optional override of the escrow funding deadline. When omitted and an
+   * escrow amount is configured, `fundBy` defaults to creation time +
+   * `ESCROW_FUNDING_WINDOW_SECONDS` (issue #247).
+   */
+  fundBy?: Date;
 }
 
 export interface UpdateDeliveryInput {
@@ -40,13 +72,16 @@ export interface AssignDriverInput {
   driverId: string;
 }
 
-export interface DeliveryFilter {
-  status?: DeliveryStatus;
-  driver?: string;
-  search?: string;
+/**
+ * Filter for the delivery list endpoint. The whitelisted fields are supplied
+ * by the shared query middleware; the service only normalises them.
+ */
+export type DeliveryFilter = {
+  filter?: Record<string, unknown>;
   page?: number;
   limit?: number;
-}
+  sort?: Record<string, SortOrder>;
+};
 
 export interface PaginatedResult<T> {
   data: T[];
@@ -77,6 +112,121 @@ const ALLOWED_TRANSITIONS: Record<DeliveryStatus, readonly DeliveryStatus[]> = {
 };
 
 export class DeliveryService {
+  /**
+   * Record a delivery milestone and fan it out to every consumer.
+   *
+   * Call this only AFTER the status change has committed. It never throws:
+   * the event is appended to the ordered `DeliveryEvent` log (gapless `seq`
+   * per delivery), then consumers run in a fixed order —
+   * notification -> webhook -> socket broadcast — each isolated so a failing
+   * consumer is logged and cannot roll back or fail the transition.
+   *
+   * @returns The persisted event, or `null` if it could not be recorded.
+   */
+  async emitMilestone(
+    delivery: IDelivery,
+    event: MilestoneInput,
+    actor: IMilestoneActor,
+  ): Promise<IDeliveryEvent | null> {
+    const deliveryId = String(delivery._id);
+    const toStatus = delivery.status;
+
+    let record: IDeliveryEvent | null = null;
+    try {
+      record = await deliveryEventRepository.append({
+        delivery: deliveryId,
+        event: event.name,
+        fromStatus: event.fromStatus,
+        toStatus,
+        payload: event.payload,
+        actor,
+      });
+    } catch (error) {
+      logger.error(
+        `[DeliveryService] Failed to record milestone '${event.name}' for delivery=${deliveryId}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    await this.runConsumer('notification', deliveryId, () =>
+      notificationService.notifyDeliveryTransition(delivery, toStatus),
+    );
+    await this.runConsumer('webhook', deliveryId, () =>
+      webhookService.dispatchDeliveryEvent(delivery, toStatus),
+    );
+    await this.runConsumer('socket', deliveryId, async () => {
+      emitDeliveryStatusUpdated(deliveryId, {
+        contractId: delivery.contractId,
+        deliveryId,
+        status: toStatus,
+        event: event.name,
+        seq: record?.seq,
+        occurredAt: (record?.occurredAt ?? new Date()).toISOString(),
+      });
+    });
+
+    return record;
+  }
+
+  /**
+   * List a delivery's milestone events, oldest first (by `seq`).
+   * Only the delivery's participants (sender/customer account, assigned
+   * driver) and admins may read it.
+   */
+  async listMilestones(
+    deliveryId: string,
+    requester: MilestoneRequester,
+    page = 1,
+    limit = 50,
+  ): Promise<PaginatedResult<IDeliveryEvent>> {
+    if (!Types.ObjectId.isValid(deliveryId)) {
+      throw new AppError('Invalid delivery ID', httpStatus.BAD_REQUEST);
+    }
+
+    const delivery = await deliveryRepository.findById(deliveryId);
+    if (!delivery) {
+      throw new AppError('Delivery not found', httpStatus.NOT_FOUND);
+    }
+
+    const isAdmin = requester.role === 'admin';
+    const participants = [
+      delivery.userId,
+      delivery.driverId,
+      delivery.sender ? String(delivery.sender) : undefined,
+    ];
+    const isParticipant = participants.some((id) => id !== undefined && id === requester.id);
+
+    if (!isAdmin && !isParticipant) {
+      throw new AppError(
+        "You are not allowed to view this delivery's events.",
+        httpStatus.FORBIDDEN,
+      );
+    }
+
+    return deliveryEventRepository.listByDelivery(deliveryId, page, limit);
+  }
+
+  /** Run one fan-out consumer; failures are logged, never propagated. */
+  private async runConsumer(
+    consumer: 'notification' | 'webhook' | 'socket',
+    deliveryId: string,
+    run: () => Promise<unknown>,
+  ): Promise<void> {
+    try {
+      await run();
+    } catch (error) {
+      logger.error(
+        `[DeliveryService] Milestone ${consumer} consumer failed for delivery=${deliveryId}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /**
+   * Generates a QR code for secure delivery handoff verification (merged
+   * capability from the legacy deliveryService module).
+   */
+  generateHandoffQrCode!: (deliveryId: string) => Promise<HandoffQrCodeResult>;
   async create(input: CreateDeliveryInput): Promise<IDelivery> {
     const existing = await Delivery.findOne({
       trackingNumber: input.trackingNumber,
@@ -86,8 +236,32 @@ export class DeliveryService {
       throw new AppError('Delivery with this tracking number already exists', httpStatus.CONFLICT);
     }
 
-    const delivery = await Delivery.create(input);
+    const { fundBy, ...rest } = input;
+    const escrowConfigured =
+      typeof input.escrowAmount === 'number' &&
+      Number.isFinite(input.escrowAmount) &&
+      input.escrowAmount > 0;
+
+    const delivery = await deliveryRepository.create({
+      ...rest,
+      deliveryFeeAsset: validateAsset(input.deliveryFeeAsset ?? { code: 'XLM' }),
+      escrowAsset: validateAsset(input.escrowAsset ?? { code: 'XLM' }),
+      // Escrow-backed deliveries get a funding deadline so they cannot sit in
+      // FUNDED-pending limbo forever (issue #247).
+      ...(escrowConfigured
+        ? {
+            fundBy: fundBy ?? new Date(Date.now() + env.ESCROW_FUNDING_WINDOW_SECONDS * 1000),
+          }
+        : {}),
+    });
     logger.info(`Delivery created: ${delivery.trackingNumber}`);
+
+    // Fire-after-commit: the delivery is already persisted at this point.
+    await this.emitMilestone(
+      delivery,
+      { name: MILESTONE_BY_STATUS[delivery.status], fromStatus: null },
+      { type: 'system' },
+    );
     return delivery;
   }
 
@@ -96,7 +270,7 @@ export class DeliveryService {
       throw new AppError('Invalid delivery ID', httpStatus.BAD_REQUEST);
     }
 
-    const delivery = await Delivery.findById(id);
+    const delivery = await Delivery.findOne({ _id: id, isDeleted: { $ne: true } });
     if (!delivery) {
       throw new AppError('Delivery not found', httpStatus.NOT_FOUND);
     }
@@ -104,29 +278,17 @@ export class DeliveryService {
   }
 
   async list(filters: DeliveryFilter): Promise<PaginatedResult<IDelivery>> {
-    const { status, driver, search, page = 1, limit = 10 } = filters;
+    const { filter, page = 1, limit = 10, sort = { createdAt: -1 } } = filters;
 
-    const query: Record<string, unknown> = {};
-
-    if (status) {
-      query.status = status;
-    }
-
-    if (driver) {
-      query.driver = new Types.ObjectId(driver);
-    }
-
-    if (search) {
-      query.$or = [
-        { trackingNumber: { $regex: search, $options: 'i' } },
-        { 'customer.name': { $regex: search, $options: 'i' } },
-        { 'customer.phone': { $regex: search, $options: 'i' } },
-      ];
-    }
+    const query: Record<string, unknown> = {
+      // Soft-deleted deliveries are only exposed via GET /deliveries/archived.
+      isDeleted: { $ne: true },
+      ...filter,
+    };
 
     const skip = (page - 1) * limit;
     const [data, total] = await Promise.all([
-      Delivery.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit).exec(),
+      Delivery.find(query).sort(sort).skip(skip).limit(limit).exec(),
       Delivery.countDocuments(query).exec(),
     ]);
 
@@ -192,12 +354,16 @@ export class DeliveryService {
     return delivery.restore();
   }
 
-  async listArchived(page = 1, limit = 10): Promise<PaginatedResult<IDelivery>> {
+  async listArchived(
+    page = 1,
+    limit = 10,
+    sort: Record<string, SortOrder> = { deletedAt: -1 },
+  ): Promise<PaginatedResult<IDelivery>> {
     const skip = (page - 1) * limit;
     const [data, total] = await Promise.all([
       Delivery.find({ isDeleted: true })
         .setOptions({ includeDeleted: true })
-        .sort({ deletedAt: -1 })
+        .sort(sort)
         .skip(skip)
         .limit(limit)
         .exec(),
@@ -228,7 +394,11 @@ export class DeliveryService {
    * @throws {AppError} 404 — delivery not found.
    * @throws {AppError} 409 — the delivery changed status concurrently.
    */
-  async updateStatus(id: string, nextStatus: DeliveryStatus): Promise<IDelivery> {
+  async updateStatus(
+    id: string,
+    nextStatus: DeliveryStatus,
+    actor: IMilestoneActor = { type: 'system' },
+  ): Promise<IDelivery> {
     if (!Types.ObjectId.isValid(id)) {
       throw new AppError('Invalid delivery ID', httpStatus.BAD_REQUEST);
     }
@@ -239,10 +409,7 @@ export class DeliveryService {
     }
 
     if (current.status === nextStatus) {
-      throw new AppError(
-        `Delivery is already in status '${nextStatus}'.`,
-        httpStatus.CONFLICT,
-      );
+      throw new AppError(`Delivery is already in status '${nextStatus}'.`, httpStatus.CONFLICT);
     }
 
     const permitted = ALLOWED_TRANSITIONS[current.status] ?? [];
@@ -280,8 +447,11 @@ export class DeliveryService {
 
     // Fire-and-forget by design: notification/webhook failures are recorded
     // inside their own services and must not roll back a committed transition.
-    await notificationService.notifyDeliveryTransition(updated, nextStatus);
-    await webhookService.dispatchDeliveryEvent(updated, nextStatus);
+    await this.emitMilestone(
+      updated,
+      { name: MILESTONE_BY_STATUS[nextStatus], fromStatus: current.status },
+      actor,
+    );
 
     return updated;
   }
@@ -357,25 +527,24 @@ export class DeliveryService {
     }
 
     // ── 5. Guard: escrow must be LOCKED ─────────────────────────────────────
-    if (escrow.lockStatus !== EscrowLockStatus.LOCKED) {
-      const statusDescriptions: Record<EscrowLockStatus, string> = {
-        [EscrowLockStatus.PENDING]:
+    if (escrow.status !== EscrowStatus.LOCKED) {
+      const statusDescriptions: Record<EscrowStatus, string> = {
+        [EscrowStatus.PENDING]:
           'the escrow contract initialisation is still pending — funds have not been locked yet',
-        [EscrowLockStatus.LOCKED]: '', // handled above (success path)
-        [EscrowLockStatus.RELEASED]:
-          'the escrowed funds have already been released',
-        [EscrowLockStatus.REFUNDED]:
-          'the escrowed funds have been refunded',
-        [EscrowLockStatus.DISPUTED]:
-          'the escrow is currently under dispute',
+        [EscrowStatus.LOCKED]: '', // handled above (success path)
+        [EscrowStatus.RELEASED]: 'the escrowed funds have already been released',
+        [EscrowStatus.REFUNDED]: 'the escrowed funds have been refunded',
+        [EscrowStatus.DISPUTED]: 'the escrow is currently under dispute',
+        [EscrowStatus.EXPIRED]: 'the escrow lock has expired and is awaiting admin resolution',
+        [EscrowStatus.RESOLVED]: 'the expired escrow has already been resolved by an admin',
       };
 
       const reason =
-        statusDescriptions[escrow.lockStatus] ??
-        `the escrow is in an unexpected state '${escrow.lockStatus}'`;
+        statusDescriptions[escrow.status] ??
+        `the escrow is in an unexpected state '${escrow.status}'`;
 
       logger.warn(
-        `[DeliveryService] assignDriver blocked — escrow lockStatus=${escrow.lockStatus} ` +
+        `[DeliveryService] assignDriver blocked — escrow status=${escrow.status} ` +
           `delivery=${deliveryId}`,
       );
 
@@ -387,6 +556,7 @@ export class DeliveryService {
     }
 
     // ── All guards passed — perform the assignment ──────────────────────────
+    const previousStatus = delivery.status;
     delivery.driverId = driverId;
     delivery.status = DeliveryStatus.ASSIGNED;
     const updated = await delivery.save();
@@ -396,8 +566,94 @@ export class DeliveryService {
         `driver=${driverId} escrow=${String(escrow._id)}`,
     );
 
+    await this.emitMilestone(
+      updated,
+      {
+        name: MILESTONE_BY_STATUS[DeliveryStatus.ASSIGNED],
+        fromStatus: previousStatus,
+        payload: { driverId: String(driverId) },
+      },
+      { type: 'system' },
+    );
+
     return updated;
   }
 }
 
 export const deliveryService = new DeliveryService();
+// ─── Handoff QR code (merged from legacy deliveryService.ts) ────────────────
+//
+// The legacy `deliveryService.ts` module provided `generateHandoffQrCode`.
+// It was merged here so the canonical `deliveryService` singleton exposes the
+// full delivery surface; the controller and DI container now share one import.
+
+import QRCode from 'qrcode';
+import { generateQrToken } from '../utils/qrToken';
+
+export interface HandoffQrCodeResult {
+  /** Base64 PNG data URL of the QR code. */
+  qrCode: string;
+  /** Signed verification token (kept out of API responses). */
+  token: string;
+  /** When the token expires. */
+  expiresAt: Date;
+  /** Delivery the QR code belongs to. */
+  deliveryId: string;
+}
+
+class DeliveryServiceQrExtensions {
+  /**
+   * Generates a QR code for secure delivery handoff verification.
+   * QR encodes delivery ID and a time-limited HMAC-signed token.
+   */
+  async generateHandoffQrCode(deliveryId: string): Promise<HandoffQrCodeResult> {
+    const delivery = await Delivery.findById(deliveryId).lean();
+
+    if (!delivery) {
+      throw new AppError('Delivery not found', httpStatus.NOT_FOUND);
+    }
+
+    const eligibleStatuses: string[] = [DeliveryStatus.IN_PROGRESS];
+    if (!eligibleStatuses.includes(String(delivery.status))) {
+      throw new AppError(
+        `Delivery is not eligible for handoff. Current status: ${delivery.status}`,
+        httpStatus.BAD_REQUEST,
+      );
+    }
+
+    const token = generateQrToken(deliveryId);
+    const expiryMinutes = parseInt(process.env.QR_TOKEN_EXPIRY_MINUTES ?? '30', 10);
+    const expiresAt = new Date(Date.now() + expiryMinutes * 60 * 1000);
+
+    const qrData = JSON.stringify({
+      deliveryId,
+      token,
+      type: 'swiftchain_handoff',
+    });
+
+    const qrCode = await QRCode.toDataURL(qrData, {
+      type: 'image/png',
+      width: 300,
+      margin: 2,
+      color: {
+        dark: '#000000',
+        light: '#FFFFFF',
+      },
+    });
+
+    return { qrCode, token, expiresAt, deliveryId };
+  }
+}
+
+/**
+ * Attach the QR/handoff capability onto the canonical `deliveryService`
+ * singleton via prototype delegation so `deliveryService.generateHandoffQrCode(id)`
+ * works without changing controller call sites.
+ */
+DeliveryService.prototype.generateHandoffQrCode = async function (
+  this: DeliveryService,
+  deliveryId: string,
+): Promise<HandoffQrCodeResult> {
+  const qr = new DeliveryServiceQrExtensions();
+  return qr.generateHandoffQrCode(deliveryId);
+};

@@ -21,7 +21,10 @@ export class DlqService {
   /**
    * List DLQ entries with pagination.
    */
-  public async listEntries(page: number = 1, limit: number = 10): Promise<{ data: IDlqEntry[]; total: number }> {
+  public async listEntries(
+    page: number = 1,
+    limit: number = 10,
+  ): Promise<{ data: IDlqEntry[]; total: number }> {
     const skip = (page - 1) * limit;
     const [data, total] = await Promise.all([
       DlqEntry.find().sort({ createdAt: -1 }).skip(skip).limit(limit).exec(),
@@ -34,7 +37,7 @@ export class DlqService {
   /**
    * Retry a specific DLQ entry.
    */
-  public async retryEntry(id: string): Promise<any> {
+  public async retryEntry(id: string, actorId?: string | null): Promise<any> {
     const entry = await DlqEntry.findById(id);
     if (!entry) {
       throw new AppError('DLQ entry not found', StatusCodes.NOT_FOUND);
@@ -50,15 +53,28 @@ export class DlqService {
     await entry.save();
 
     try {
+      // Escalated indexer events re-drive through the EventLog retry path, which
+      // replays them via the event poller. Dynamic import: that service imports this one.
+      if (entry.payload?.type === 'eventlog') {
+        const { eventLogRetryService } = await import('./eventLogRetryService');
+        const retried = await eventLogRetryService.retryById(entry.payload.eventLogId, actorId);
+        if (retried.outcome !== 'processed') {
+          throw new Error(retried.event.lastError ?? 'Event handler failed again');
+        }
+        entry.status = DlqStatus.RESOLVED;
+        await entry.save();
+        return retried;
+      }
+
       // Dynamic import to break circular dependency with stellarService
       const { stellarService } = await import('./stellarService');
-      
+
       // Currently, we assume the payload is a SubmitEscrowLockInput
       // since that's the main transaction failure we are catching.
       // If there are other types, we might need a type field in the DLQ entry.
       // For now, we attempt to retry it via stellarService.submitEscrowLock
       const result = await stellarService.submitEscrowLock(entry.payload);
-      
+
       entry.status = DlqStatus.RESOLVED;
       await entry.save();
       return result;

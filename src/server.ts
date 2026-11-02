@@ -1,6 +1,6 @@
 import http from 'http';
-import dotenv from 'dotenv';
 import app from './app';
+import env from './config/env';
 import logger from './config/logger';
 import { startIndexerLagMonitor } from './services/monitorService';
 import {
@@ -11,11 +11,10 @@ import {
 import { startEscrowMonitorJob, stopEscrowMonitorJob } from './jobs/escrowMonitor';
 import { startWebhookRetryJob, stopWebhookRetryJob } from './jobs/webhookRetryJob';
 import { startAutoAssignmentJob, stopAutoAssignmentJob } from './jobs/autoAssignmentJob';
+import { startDriverRatingJob, stopDriverRatingJob } from './jobs/driverRatingJob';
+import { startEventLogRetryJob, stopEventLogRetryJob } from './jobs/eventLogRetryJob';
 import { startEventPoller, stopEventPoller } from './services/eventPoller';
 import { initializeRedis, disconnectRedis } from './config/redis';
-import env from './config/env';
-
-dotenv.config();
 
 const PORT = env.PORT;
 
@@ -38,16 +37,12 @@ const initializeServices = async (): Promise<void> => {
 };
 
 httpServer.listen(PORT, () => {
-  logger.info(
-    `🚀 Server running on port ${PORT} in ${env.NODE_ENV} mode`
-  );
+  logger.info(`🚀 Server running on port ${PORT} in ${env.NODE_ENV} mode`);
   logger.info(`📝 Health check: http://localhost:${PORT}/health`);
   logger.info(`📦 ETA endpoint: http://localhost:${PORT}/api/v1/deliveries/:id/eta`);
 
   // Initialize Redis and other services
-  initializeServices().catch((error) =>
-    logger.error('Error initializing services:', error)
-  );
+  initializeServices().catch((error) => logger.error('Error initializing services:', error));
 
   startIndexerLagMonitor();
 });
@@ -56,19 +51,22 @@ if (env.NODE_ENV !== 'test') {
   startEscrowMonitorJob();
   startWebhookRetryJob();
   startAutoAssignmentJob();
+  startDriverRatingJob();
   startEventPoller();
+  startEventLogRetryJob();
 }
 
 const gracefulShutdown = (): void => {
   logger.info('Shutting down gracefully...');
   stopEventPoller();
+  stopEventLogRetryJob();
   stopEscrowMonitorJob();
   stopWebhookRetryJob();
   stopAutoAssignmentJob();
+  stopDriverRatingJob();
 
   // Disconnect Redis
-  disconnectRedis()
-    .catch((error) => logger.error('Error disconnecting Redis:', error));
+  disconnectRedis().catch((error) => logger.error('Error disconnecting Redis:', error));
 
   shutdownSocketServer(io)
     .catch((error) => logger.error('Error shutting down Socket.IO server:', error))

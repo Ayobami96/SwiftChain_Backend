@@ -82,12 +82,12 @@ function parseEscrowEvent(decoded: Record<string, unknown>): ParsedEscrow {
   return {
     type: 'escrow',
     escrowId: (decoded.escrowId as string) || '',
-    client: decoded.client || '',
-    freelancer: decoded.freelancer || '',
-    amount: decoded.amount || '0',
-    asset: decoded.asset || 'XLM',
-    releaseCondition: decoded.releaseCondition || '',
-    timestamp: decoded.timestamp || Date.now(),
+    client: (decoded.client as string) || '',
+    freelancer: (decoded.freelancer as string) || '',
+    amount: (decoded.amount as string) || '0',
+    asset: (decoded.asset as string) || 'XLM',
+    releaseCondition: (decoded.releaseCondition as string) || '',
+    timestamp: (decoded.timestamp as number) || Date.now(),
   };
 }
 

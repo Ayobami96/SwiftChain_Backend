@@ -6,7 +6,7 @@ import app from '../src/app';
 import User from '../src/models/User';
 import Escrow, { EscrowStatus } from '../src/models/Escrow';
 import { UserRole, UserStatus } from '../src/interfaces/IUser';
-import { scanForExpiredEscrows } from '../src/services/escrowService';
+import { escrowService } from '../src/services/escrow.service';
 
 // ─── Module mocks ──────────────────────────────────────────────────────────────
 
@@ -24,6 +24,16 @@ jest.mock('../src/config/logger', () => ({
 jest.mock('../src/blockchain/soroban.service', () => ({
   sorobanService: {
     getLatestLedger: jest.fn().mockResolvedValue(999999),
+  },
+}));
+
+jest.mock('../src/config/redis', () => ({
+  withLock: jest
+    .fn()
+    .mockImplementation(async (_resourceKey: string, fn: () => Promise<any>) => fn()),
+  redisClient: {
+    get: jest.fn(),
+    set: jest.fn(),
   },
 }));
 
@@ -52,10 +62,9 @@ afterAll(async () => {
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
-const JWT_SECRET = 'test-secret-key';
+const JWT_SECRET = 'test-secret-key-16chars';
 
-const signToken = (userId: string): string =>
-  jwt.sign({ id: userId }, JWT_SECRET, { expiresIn: '1h' });
+const signToken = (userId: string): string => jwt.sign({ userId }, JWT_SECRET, { expiresIn: '1h' });
 
 const createUser = async (
   overrides: Partial<{ role: UserRole; status: UserStatus }> = {},
@@ -75,10 +84,11 @@ const createExpiredEscrow = async (
   overrides: Partial<{ amount: number }> = {},
 ): Promise<InstanceType<typeof Escrow>> => {
   return Escrow.create({
-    deliveryId: new mongoose.Types.ObjectId().toString(),
+    delivery: new mongoose.Types.ObjectId(),
     amount: overrides.amount ?? 100,
+    assetCode: 'XLM',
     lockedAt: new Date(Date.now() - 10 * 60 * 1000),
-    ttlSeconds: 60,
+    expiresAt: new Date(Date.now() - 60 * 1000),
     status: EscrowStatus.LOCKED,
   });
 };
@@ -86,10 +96,12 @@ const createExpiredEscrow = async (
 /** Creates an escrow record whose TTL has not yet elapsed. */
 const createActiveEscrow = async (): Promise<InstanceType<typeof Escrow>> => {
   return Escrow.create({
-    deliveryId: new mongoose.Types.ObjectId().toString(),
+    delivery: new mongoose.Types.ObjectId(),
     amount: 100,
+    assetCode: 'XLM',
+    payerAddress: 'GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H',
     lockedAt: new Date(),
-    ttlSeconds: 3600,
+    expiresAt: new Date(Date.now() + 3600 * 1000),
     status: EscrowStatus.LOCKED,
   });
 };
@@ -101,7 +113,7 @@ describe('scanForExpiredEscrows', () => {
     const expired = await createExpiredEscrow();
     const active = await createActiveEscrow();
 
-    const result = await scanForExpiredEscrows();
+    const result = await escrowService.scanForExpiredEscrows();
 
     expect(result.flaggedCount).toBe(1);
 
@@ -117,7 +129,7 @@ describe('scanForExpiredEscrows', () => {
   it('is a no-op when no escrows have expired', async () => {
     await createActiveEscrow();
 
-    const result = await scanForExpiredEscrows();
+    const result = await escrowService.scanForExpiredEscrows();
 
     expect(result.flaggedCount).toBe(0);
     expect(result.flaggedEscrows).toHaveLength(0);
@@ -125,9 +137,9 @@ describe('scanForExpiredEscrows', () => {
 
   it('does not re-flag escrows that are already expired', async () => {
     const expired = await createExpiredEscrow();
-    await scanForExpiredEscrows();
+    await escrowService.scanForExpiredEscrows();
 
-    const result = await scanForExpiredEscrows();
+    const result = await escrowService.scanForExpiredEscrows();
 
     expect(result.flaggedCount).toBe(0);
     const refreshed = await Escrow.findById(expired._id);
@@ -142,7 +154,7 @@ describe('GET /api/v1/admin/escrows/flagged', () => {
     process.env.JWT_SECRET = JWT_SECRET;
 
     await createExpiredEscrow();
-    await scanForExpiredEscrows();
+    await escrowService.scanForExpiredEscrows();
 
     const admin = await createUser({ role: UserRole.ADMIN });
     const token = signToken(admin._id.toString());
@@ -199,7 +211,7 @@ describe('PATCH /api/v1/admin/escrows/:id/resolve', () => {
     process.env.JWT_SECRET = JWT_SECRET;
 
     const expired = await createExpiredEscrow();
-    await scanForExpiredEscrows();
+    await escrowService.scanForExpiredEscrows();
 
     const admin = await createUser({ role: UserRole.ADMIN });
     const token = signToken(admin._id.toString());
@@ -207,21 +219,24 @@ describe('PATCH /api/v1/admin/escrows/:id/resolve', () => {
     const res = await request(app)
       .patch(`/api/v1/admin/escrows/${expired._id}/resolve`)
       .set('Authorization', `Bearer ${token}`)
-      .send({ notes: 'Manually released funds to the customer.' });
+      .send({
+        resolution: 'release_to_driver',
+        reason: 'Manually released funds to the customer.',
+      });
 
     expect(res.status).toBe(200);
-    expect(res.body.data.escrow.status).toBe('resolved');
+    expect(res.body.data.escrow.status).toBe(EscrowStatus.RELEASED);
 
     const refreshed = await Escrow.findById(expired._id);
-    expect(refreshed?.status).toBe(EscrowStatus.RESOLVED);
+    expect(refreshed?.status).toBe(EscrowStatus.RELEASED);
     expect(refreshed?.resolvedBy).toBe(admin._id.toString());
   });
 
-  it('returns 400 when notes are missing', async () => {
+  it('returns 400 when reason or resolution is missing', async () => {
     process.env.JWT_SECRET = JWT_SECRET;
 
     const expired = await createExpiredEscrow();
-    await scanForExpiredEscrows();
+    await escrowService.scanForExpiredEscrows();
 
     const admin = await createUser({ role: UserRole.ADMIN });
     const token = signToken(admin._id.toString());
@@ -234,18 +249,27 @@ describe('PATCH /api/v1/admin/escrows/:id/resolve', () => {
     expect(res.status).toBe(400);
   });
 
-  it('returns 409 when the escrow is not in the expired state', async () => {
+  it('returns 409 when the escrow is in a terminal status', async () => {
     process.env.JWT_SECRET = JWT_SECRET;
 
-    const active = await createActiveEscrow();
+    const terminal = await Escrow.create({
+      delivery: new mongoose.Types.ObjectId(),
+      amount: 100,
+      assetCode: 'XLM',
+      payerAddress: 'GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H',
+      status: EscrowStatus.RELEASED,
+    });
 
     const admin = await createUser({ role: UserRole.ADMIN });
     const token = signToken(admin._id.toString());
 
     const res = await request(app)
-      .patch(`/api/v1/admin/escrows/${active._id}/resolve`)
+      .patch(`/api/v1/admin/escrows/${terminal._id}/resolve`)
       .set('Authorization', `Bearer ${token}`)
-      .send({ notes: 'Attempting early resolution.' });
+      .send({
+        resolution: 'release_to_driver',
+        reason: 'Attempting terminal resolution.',
+      });
 
     expect(res.status).toBe(409);
   });
@@ -260,7 +284,10 @@ describe('PATCH /api/v1/admin/escrows/:id/resolve', () => {
     const res = await request(app)
       .patch(`/api/v1/admin/escrows/${nonExistentId}/resolve`)
       .set('Authorization', `Bearer ${token}`)
-      .send({ notes: 'Test.' });
+      .send({
+        resolution: 'release_to_driver',
+        reason: 'Test.',
+      });
 
     expect(res.status).toBe(404);
   });

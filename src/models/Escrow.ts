@@ -8,6 +8,10 @@ export enum EscrowStatus {
   RELEASED = 'released',
   REFUNDED = 'refunded',
   DISPUTED = 'disputed',
+  /** Lock TTL elapsed without resolution — flagged for admin review. */
+  EXPIRED = 'expired',
+  /** An admin closed out an expired escrow. */
+  RESOLVED = 'resolved',
 }
 
 /**
@@ -21,6 +25,7 @@ export enum EscrowLockStatus {
   RELEASED = 'released',
   REFUNDED = 'refunded',
   DISPUTED = 'disputed',
+  EXPIRED = 'expired',
 }
 
 /** Escrow states in which funds are actually held by the contract. */
@@ -33,6 +38,7 @@ const FUNDS_HELD_STATUSES: ReadonlySet<EscrowStatus> = new Set([
 const TERMINAL_STATUSES: ReadonlySet<EscrowStatus> = new Set([
   EscrowStatus.RELEASED,
   EscrowStatus.REFUNDED,
+  EscrowStatus.RESOLVED,
 ]);
 
 /** The kind of on‑chain operation a recorded transaction hash represents. */
@@ -81,6 +87,21 @@ export interface IEscrow extends Document {
   lastSyncedLedger?: number;
   /** Reason recorded when the escrow moved to `disputed`. */
   disputeReason?: string;
+  /** Expiry, flagging and resolution audit fields for the escrow lifecycle. */
+  /** Absolute point in time after which the lock is considered stale. */
+  expiresAt?: Date;
+  /** When the escrow transitioned to `expired`. */
+  expiredAt?: Date;
+  /** When the expiry scan flagged the escrow. */
+  flaggedAt?: Date;
+  /** Soroban ledger sequence at which the expiry was detected (audit trail). */
+  flaggedLedger?: number;
+  /** When an admin resolved the expired escrow. */
+  resolvedAt?: Date;
+  /** Admin who resolved the expired escrow. */
+  resolvedBy?: string;
+  /** Admin-provided audit note describing the resolution. */
+  resolutionNotes?: string;
   /** Timestamp fields provided by Mongoose. */
   createdAt: Date;
   updatedAt: Date;
@@ -98,7 +119,7 @@ const EscrowTransactionSchema = new Schema<IEscrowTransaction>(
     ledger: { type: Number },
     recordedAt: { type: Date, default: Date.now },
   },
-  { _id: false }
+  { _id: false },
 );
 
 // Shared defaults/validation for both lifecycle status fields.
@@ -107,9 +128,20 @@ const STATUS_VALUES = Object.values(EscrowStatus);
 
 const EscrowSchema = new Schema<IEscrow>(
   {
-    delivery: { type: Schema.Types.ObjectId, ref: 'Delivery', required: true, unique: true, index: true },
-    // Upstream lifecycle state.
-    status: { type: String, enum: STATUS_VALUES, default: EscrowStatus.PENDING, index: true },
+    delivery: {
+      type: Schema.Types.ObjectId,
+      ref: 'Delivery',
+      required: true,
+      unique: true,
+      index: true,
+    },
+    status: {
+      type: String,
+      enum: Object.values(EscrowStatus),
+      default: EscrowStatus.PENDING,
+      required: true,
+      index: true,
+    },
     // Legacy lock-state alias (kept in sync by the service layer).
     lockStatus: { type: String, enum: LOCK_STATUS_VALUES, default: EscrowLockStatus.PENDING, index: true },
     amount: { type: Number, required: true, min: 0 },
@@ -119,6 +151,7 @@ const EscrowSchema = new Schema<IEscrow>(
     assetCode: { type: String, trim: true, uppercase: true, maxlength: 12 },
     asset: { type: String, trim: true },
     assetIssuer: { type: String, trim: true },
+    // Unique: one on-chain escrow contract backs at most one escrow record.
     contractId: { type: String, trim: true, unique: true, sparse: true },
     payerAddress: { type: String, trim: true },
     fundedBy: { type: String, trim: true },
@@ -131,6 +164,13 @@ const EscrowSchema = new Schema<IEscrow>(
     refundedAt: { type: Date },
     lastSyncedLedger: { type: Number, min: 0 },
     disputeReason: { type: String, trim: true },
+    expiresAt: { type: Date, index: true },
+    expiredAt: { type: Date },
+    flaggedAt: { type: Date },
+    flaggedLedger: { type: Number, min: 0 },
+    resolvedAt: { type: Date },
+    resolvedBy: { type: String, trim: true },
+    resolutionNotes: { type: String, trim: true },
     transactions: { type: [EscrowTransactionSchema], default: [] },
   },
   {
@@ -145,7 +185,7 @@ const EscrowSchema = new Schema<IEscrow>(
       },
     },
     toObject: { virtuals: true },
-  }
+  },
 );
 
 // Virtuals
@@ -164,7 +204,8 @@ EscrowSchema.virtual('isSettled').get(function (this: IEscrow) {
 // all escrows, preventing duplicate ingestion by the indexer.
 EscrowSchema.index({ 'transactions.hash': 1 }, { unique: true, sparse: true });
 
-const Escrow: Model<IEscrow> = (mongoose.models.Escrow as Model<IEscrow>) || mongoose.model<IEscrow>('Escrow', EscrowSchema);
+const Escrow: Model<IEscrow> =
+  (mongoose.models.Escrow as Model<IEscrow>) || mongoose.model<IEscrow>('Escrow', EscrowSchema);
 
 export default Escrow;
 export { Escrow };

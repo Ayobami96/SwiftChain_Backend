@@ -20,7 +20,7 @@
 
 import request from 'supertest';
 import mongoose from 'mongoose';
-import jwt from 'jsonwebtoken';
+
 import axios from 'axios';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import type { Express } from 'express';
@@ -29,14 +29,52 @@ import { Delivery } from '../../src/models/Delivery';
 import User from '../../src/models/User';
 import { deliveryService } from '../../src/services/deliveryService';
 import { routingService } from '../../src/services/routingService';
-import type { ETARequest, ETAResponse } from '../../src/services/routingService';
+import type { ETARequest } from '../../src/services/routingService';
 
 /**
  * Mock axios to control Google Maps API responses.
  * Only the HTTP client is mocked; the routing service logic itself is real.
  */
-jest.mock('axios');
+jest.mock('axios', () => {
+  const instance = {
+    interceptors: {
+      request: { use: jest.fn(), eject: jest.fn() },
+      response: { use: jest.fn(), eject: jest.fn() },
+    },
+    get: jest.fn(),
+    post: jest.fn(),
+    put: jest.fn(),
+    delete: jest.fn(),
+    patch: jest.fn(),
+  };
+  return {
+    __esModule: true,
+    default: {
+      ...instance,
+      create: jest.fn(() => instance),
+    },
+    ...instance,
+    create: jest.fn(() => instance),
+  };
+});
 const mockedAxios = axios as jest.Mocked<typeof axios>;
+
+jest.mock('../../src/config/stellar', () => ({
+  stellarConfig: {
+    rpcUrl: 'https://soroban-testnet.stellar.org',
+    networkPassphrase: 'Test SDF Network ; September 2015',
+    network: 'testnet',
+    timeoutMs: 10000,
+    server: {},
+  },
+  default: {
+    rpcUrl: 'https://soroban-testnet.stellar.org',
+    networkPassphrase: 'Test SDF Network ; September 2015',
+    network: 'testnet',
+    timeoutMs: 10000,
+    server: {},
+  },
+}));
 
 jest.mock('../../src/config/logger', () => ({
   info: jest.fn(),
@@ -336,9 +374,7 @@ describe('Delivery ETA Integration Tests — Google Maps API', () => {
         };
 
         // Should throw error and trigger fallback in calling code
-        await expect(routingService.calculateETA(request)).rejects.toThrow(
-          'Google Maps API error',
-        );
+        await expect(routingService.calculateETA(request)).rejects.toThrow('Google Maps API error');
       } finally {
         if (originalKey) {
           process.env.GOOGLE_MAPS_API_KEY = originalKey;

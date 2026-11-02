@@ -80,7 +80,7 @@ describe('EventLog Model & Service', () => {
     });
 
     it('should mark event as processed', async () => {
-      await eventLogService.createEventLog({
+      const _event = await eventLogService.createEventLog({
         eventType: 'delivery',
         transactionHash: '0x1234567890abcdef',
         ledgerSequence: 1000,

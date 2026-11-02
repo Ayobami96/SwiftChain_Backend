@@ -6,7 +6,7 @@ import AppError from '../utils/AppError';
 import asyncHandler from '../utils/asyncHandler';
 import { sendSuccess } from '../utils/responseWrapper';
 import type { AuthenticatedRequest } from '../middlewares/authMiddleware';
-import { UserRole, UserStatus } from '../interfaces/IUser';
+import { resolveQueryOptions, buildPaginationMeta } from '../middlewares/queryMiddleware';
 
 class UserController {
   /**
@@ -79,7 +79,15 @@ class UserController {
   public updateUser = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction): Promise<void> => {
       const { id } = req.params;
-      const allowedFields = ['firstName', 'lastName', 'role', 'status', 'walletAddress', 'profilePicture', 'profilePictureKey'];
+      const allowedFields = [
+        'firstName',
+        'lastName',
+        'role',
+        'status',
+        'walletAddress',
+        'profilePicture',
+        'profilePictureKey',
+      ];
       const updateInput: Record<string, unknown> = {};
 
       for (const key of allowedFields) {
@@ -159,10 +167,7 @@ class UserController {
       const { id } = req.params;
 
       if (currentUserId !== id) {
-        throw new AppError(
-          'You can only update your own password.',
-          StatusCodes.FORBIDDEN,
-        );
+        throw new AppError('You can only update your own password.', StatusCodes.FORBIDDEN);
       }
 
       const { currentPassword, newPassword } = req.body as {
@@ -178,10 +183,7 @@ class UserController {
       }
 
       if (newPassword.length < 8) {
-        throw new AppError(
-          'New password must be at least 8 characters.',
-          StatusCodes.BAD_REQUEST,
-        );
+        throw new AppError('New password must be at least 8 characters.', StatusCodes.BAD_REQUEST);
       }
 
       const user = await userService.updatePassword(id, { currentPassword, newPassword });
@@ -202,37 +204,14 @@ class UserController {
    */
   public listDeletedUsers = asyncHandler(
     async (req: Request, res: Response, _next: NextFunction): Promise<void> => {
-      const {
-        role,
-        status,
-        search,
-        page = '1',
-        limit = '10',
-      } = req.query as Record<string, unknown>;
+      const { filter, page, limit, sort } = resolveQueryOptions(req);
 
-      const parsedPage = Math.max(1, parseInt(page as string, 10) || 1);
-      const parsedLimit = Math.min(100, Math.max(1, parseInt(limit as string, 10) || 10));
-
-      const filters: Parameters<typeof userService.getDeletedUsers>[0] = {
-        page: parsedPage,
-        limit: parsedLimit,
-      };
-
-      if (role) filters.role = role as UserRole;
-      if (status) filters.status = status as UserStatus;
-      if (search) filters.search = search as string;
-
-      const result = await userService.getDeletedUsers(filters);
+      const result = await userService.getDeletedUsers({ filter, page, limit, sort });
 
       res.status(StatusCodes.OK).json({
         status: 'success',
         data: result.data,
-        pagination: {
-          total: result.total,
-          page: result.page,
-          limit: result.limit,
-          totalPages: result.totalPages,
-        },
+        pagination: buildPaginationMeta(result.total, result.page, result.limit),
       });
     },
   );

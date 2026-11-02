@@ -3,17 +3,20 @@
  *
  * This file defines all named injection tokens used throughout the Awilix DI container.
  * Tokens are organized by category (Services, Models, Controllers, Config) for clarity.
+ *
+ * Token policy: exactly one canonical camelCase token per registration. Legacy
+ * snake_case aliases (e.g. `delivery_service`) were removed so the container can
+ * never resolve a duplicate or ambiguous binding for the same dependency.
  */
 
 export const TOKENS = {
   // Services
   authService: 'authService',
   deliveryService: 'deliveryService',
-  delivery_service: 'delivery_service', // Alternate export (delivery.service.ts)
   driverService: 'driverService',
+  driverRatingService: 'driverRatingService',
   fleetService: 'fleetService',
   escrowService: 'escrowService',
-  escrow_service: 'escrow_service', // Alternate export (escrow.service.ts)
   disputeService: 'disputeService',
   adminService: 'adminService',
   dashboardService: 'dashboardService',
@@ -30,6 +33,11 @@ export const TOKENS = {
   indexerService: 'indexerService',
   monitorService: 'monitorService',
   idempotencyService: 'idempotencyService',
+
+  // External SDK clients behind provider interfaces (issue #222)
+  routingProvider: 'routingProvider',
+  sorobanRpcClient: 'sorobanRpcClient',
+  imagesStorage: 'imagesStorage',
 
   // Models (Mongoose schemas)
   userModel: 'userModel',
@@ -55,13 +63,11 @@ export const TOKENS = {
   // Controllers
   authController: 'authController',
   deliveryController: 'deliveryController',
-  delivery_controller: 'delivery_controller', // Alternate export (delivery.controller.ts)
-  deliveryCrudController: 'deliveryCrudController',
   deliveryStatusController: 'deliveryStatusController',
   driverController: 'driverController',
+  driverRatingController: 'driverRatingController',
   fleetController: 'fleetController',
   escrowController: 'escrowController',
-  escrow_controller: 'escrow_controller', // Alternate export (escrow.controller.ts)
   disputeController: 'disputeController',
   adminController: 'adminController',
   dashboardController: 'dashboardController',
@@ -72,8 +78,6 @@ export const TOKENS = {
   transactionController: 'transactionController',
   circuitBreakerController: 'circuitBreakerController',
   indexerController: 'indexerController',
-  indexer_controller: 'indexer_controller', // Alternate export (indexer.controller.ts)
   monitorController: 'monitorController',
   stellarController: 'stellarController',
-  stellar_controller: 'stellar_controller', // Alternate export (stellar.controller.ts)
 } as const;
