@@ -137,7 +137,7 @@ const setCheckpoint = async (lastProcessedLedger: number): Promise<void> => {
 const readCheckpoint = async (): Promise<number | undefined> =>
   (await IndexerStatus.findOne({ network: NETWORK }).lean())?.lastProcessedLedger;
 
-const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 20));
+const flush = (ms = 20): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 // ─── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -348,6 +348,65 @@ describe('EventPoller', () => {
     });
   });
 
+  describe('injected fetcher', () => {
+    it('reads events from the injected fetcher after the checkpoint instead of the RPC node', async () => {
+      await setCheckpoint(100);
+      const events = [buildEvent({ ledger: 101, txHash: 'tx-injected' })];
+      const { rpc, getEvents } = createFakeRpc(105, events);
+      const fetchNextEvents = jest.fn(async function* (lastLedger: number) {
+        expect(lastLedger).toBe(100);
+        yield* events;
+      });
+      const handle = jest.fn().mockResolvedValue(undefined);
+      const poller = new EventPoller({
+        rpc,
+        network: NETWORK,
+        contractId: CONTRACT_ID,
+        subscriptions: [subscriptionFor(handle)],
+        intervalMs: 60_000,
+        pageSize: 100,
+        fetchNextEvents,
+      });
+
+      const result = await poller.pollOnce();
+
+      expect(fetchNextEvents).toHaveBeenCalledWith(100);
+      expect(getEvents).not.toHaveBeenCalled();
+      expect(handle).toHaveBeenCalledWith(events[0]);
+      expect(result).toMatchObject({ fromLedger: 101, toLedger: 105, processed: 1 });
+      expect(await readCheckpoint()).toBe(105);
+    });
+
+    it('ignores events the injected fetcher returns outside the cycle window', async () => {
+      await setCheckpoint(100);
+      const events = [
+        buildEvent({ ledger: 100, txHash: 'tx-old' }),
+        buildEvent({ ledger: 105, txHash: 'tx-head' }),
+        buildEvent({ ledger: 106, txHash: 'tx-future' }),
+      ];
+      const { rpc } = createFakeRpc(105, events);
+      const handle = jest.fn().mockResolvedValue(undefined);
+      const poller = new EventPoller({
+        rpc,
+        network: NETWORK,
+        contractId: CONTRACT_ID,
+        subscriptions: [subscriptionFor(handle)],
+        intervalMs: 60_000,
+        pageSize: 100,
+        fetchNextEvents: async function* (): AsyncGenerator<StellarRpc.Api.EventResponse> {
+          yield* events;
+        },
+      });
+
+      const result = await poller.pollOnce();
+
+      expect(handle).toHaveBeenCalledTimes(1);
+      expect(handle).toHaveBeenCalledWith(events[1]);
+      expect(result).toMatchObject({ fetched: 1, processed: 1 });
+      expect(await EventLog.countDocuments({})).toBe(1);
+    });
+  });
+
   describe('lifecycle', () => {
     it('runs an immediate cycle on start and stops scheduling on stop', async () => {
       const { rpc, getLatestLedger } = createFakeRpc(100, []);
@@ -361,6 +420,53 @@ describe('EventPoller', () => {
       poller.stop();
       await flush();
       expect(getLatestLedger).toHaveBeenCalledTimes(1);
+    });
+
+    it('reports isRunning and schedules cycles on the configured interval', async () => {
+      const intervalSpy = jest.spyOn(global, 'setInterval');
+      try {
+        const { rpc } = createFakeRpc(100, []);
+        const poller = createPoller(rpc, jest.fn());
+
+        expect(poller.isRunning).toBe(false);
+        poller.start();
+        await flush();
+
+        expect(poller.isRunning).toBe(true);
+        expect(intervalSpy).toHaveBeenCalledWith(expect.any(Function), 60_000);
+
+        poller.stop();
+        expect(poller.isRunning).toBe(false);
+      } finally {
+        intervalSpy.mockRestore();
+      }
+    });
+
+    it('keeps ticking after a failed cycle', async () => {
+      await setCheckpoint(100);
+      const intervalSpy = jest.spyOn(global, 'setInterval');
+      try {
+        const { rpc } = createFakeRpc(105, []);
+        const getLatestLedger = jest
+          .spyOn(rpc, 'getLatestLedger')
+          .mockRejectedValue(new Error('rpc unavailable'));
+        const poller = createPoller(rpc, jest.fn());
+
+        poller.start();
+        await flush(100);
+        expect(getLatestLedger).toHaveBeenCalledTimes(1);
+        expect(poller.isRunning).toBe(true);
+
+        const tick = intervalSpy.mock.calls[0][0] as () => void;
+        tick();
+        await flush(100);
+
+        expect(getLatestLedger).toHaveBeenCalledTimes(2);
+        expect(poller.isRunning).toBe(true);
+        poller.stop();
+      } finally {
+        intervalSpy.mockRestore();
+      }
     });
   });
 });
