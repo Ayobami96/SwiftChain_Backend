@@ -12,7 +12,7 @@ import {
 import { StatusCodes } from 'http-status-codes';
 import { stellarConfig } from '../config/stellar';
 import type { ISorobanRpcClient } from './providers/sorobanRpcClient';
-import { SdkSorobanRpcClient } from './providers/adapters';
+import { defaultSorobanRpcClient } from './providers/adapters';
 import { deliveryService } from './delivery.service';
 import { IDelivery } from '../models/Delivery';
 import { toStroops } from '../utils/stroops';
@@ -266,7 +266,7 @@ export class StellarService {
   private readonly rpcJitterRatio: number;
   private readonly rpcTimeoutMs: number;
 
-  constructor(client: ISorobanRpcClient = new SdkSorobanRpcClient()) {
+  constructor(client: ISorobanRpcClient = defaultSorobanRpcClient) {
     this.client = client;
     this.badSeqMaxRetries = env.STELLAR_BAD_SEQ_MAX_RETRIES;
     this.rpcMaxAttempts = env.SOROBAN_RPC_MAX_RETRIES;
