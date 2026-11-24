@@ -10,6 +10,7 @@
 import mongoose from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import { rpc as StellarRpc, xdr } from '@stellar/stellar-sdk';
+import { performance } from 'node:perf_hooks';
 import EventLog from '../src/models/EventLog';
 import { IndexerStatus } from '../src/models/IndexerStatus';
 import { EventPoller, EventSubscription } from '../src/services/eventPoller';
@@ -209,6 +210,107 @@ describe('EventPoller', () => {
       expect(getEvents.mock.calls[1][0]).toMatchObject({ cursor: '2' });
       expect(getEvents.mock.calls[1][0]).not.toHaveProperty('startLedger');
     });
+
+    it('ingests the CI soak batch within throughput, latency, memory, and lag bounds without duplicate mutations', async () => {
+      const eventCount = 5_000;
+      const eventsPerLedger = 100;
+      const startLedger = 10_000;
+      const ledgerCount = eventCount / eventsPerLedger;
+      const latestLedger = startLedger + ledgerCount - 1;
+      const maximumLagLedgers = ledgerCount + 5;
+      const events = Array.from({ length: eventCount }, (_, index) =>
+        buildEvent({
+          id: `soak-event-${index}`,
+          txHash: `soak-tx-${index}`,
+          ledger: startLedger + Math.floor(index / eventsPerLedger),
+        }),
+      );
+      const handlerMutations = new Map<string, number>();
+      const handlerLatenciesMs: number[] = [];
+      const lagSamples: number[] = [];
+      let maximumLag = 0;
+      const initialHeapBytes = process.memoryUsage().heapUsed;
+      let maximumHeapBytes = initialHeapBytes;
+
+      await setCheckpoint(startLedger - 1);
+
+      const rpc = {
+        getLatestLedger: jest.fn(async () => ({ sequence: latestLedger })),
+        getEvents: jest.fn(async (request: SorobanGetEventsRequest) => {
+          const pageSize = request.limit ?? 100;
+          const offset = request.cursor !== undefined ? Number(request.cursor) : 0;
+          const page = events.slice(offset, offset + pageSize);
+          const deliveredAt = performance.now();
+          for (const event of page) {
+            (event as StellarRpc.Api.EventResponse & { soakDeliveredAt?: number }).soakDeliveredAt =
+              deliveredAt;
+          }
+
+          const checkpoint = await readCheckpoint();
+          const lag = latestLedger - (checkpoint ?? 0);
+          lagSamples.push(lag);
+          maximumLag = Math.max(maximumLag, lag);
+          maximumHeapBytes = Math.max(maximumHeapBytes, process.memoryUsage().heapUsed);
+
+          return {
+            latestLedger,
+            events: page,
+            cursor: String(offset + page.length),
+          } as Awaited<ReturnType<ISorobanRpcClient['getEvents']>>;
+        }),
+      } as unknown as ISorobanRpcClient;
+
+      const handle = jest.fn(async (event: StellarRpc.Api.EventResponse) => {
+        const txHash = event.txHash;
+        handlerMutations.set(txHash, (handlerMutations.get(txHash) ?? 0) + 1);
+        const deliveredAt = (event as StellarRpc.Api.EventResponse & { soakDeliveredAt: number })
+          .soakDeliveredAt;
+        handlerLatenciesMs.push(performance.now() - deliveredAt);
+        maximumHeapBytes = Math.max(maximumHeapBytes, process.memoryUsage().heapUsed);
+      });
+
+      const poller = createPoller(rpc, handle, 250);
+      const startedAt = performance.now();
+      const firstPass = await poller.pollOnce();
+      const elapsedSeconds = (performance.now() - startedAt) / 1_000;
+      const eventsPerSecond = firstPass.processed / elapsedSeconds;
+      const p95Index = Math.ceil(handlerLatenciesMs.length * 0.95) - 1;
+      const p95IngestLatencyMs = handlerLatenciesMs.sort((left, right) => left - right)[p95Index];
+      const heapGrowthMb = (maximumHeapBytes - initialHeapBytes) / (1024 * 1024);
+
+      expect(firstPass).toMatchObject({
+        fromLedger: startLedger,
+        toLedger: latestLedger,
+        fetched: eventCount,
+        processed: eventCount,
+        duplicates: 0,
+        failed: 0,
+      });
+      expect(eventsPerSecond).toBeGreaterThanOrEqual(10);
+      expect(p95IngestLatencyMs).toBeLessThanOrEqual(2_500);
+      expect(heapGrowthMb).toBeLessThanOrEqual(512);
+      expect(maximumLag).toBeLessThanOrEqual(maximumLagLedgers);
+      expect(new Set(lagSamples).size).toBe(1);
+      expect(await EventLog.countDocuments({ eventType: 'escrow', status: 'processed' })).toBe(
+        eventCount,
+      );
+      expect(await readCheckpoint()).toBe(latestLedger);
+
+      await setCheckpoint(startLedger - 1);
+      const duplicatePass = await poller.pollOnce();
+
+      expect(duplicatePass).toMatchObject({
+        fetched: eventCount,
+        processed: 0,
+        duplicates: eventCount,
+        failed: 0,
+      });
+      expect(handle).toHaveBeenCalledTimes(eventCount);
+      expect(handlerMutations.size).toBe(eventCount);
+      expect([...handlerMutations.values()].every((count) => count === 1)).toBe(true);
+      expect(await EventLog.countDocuments({ eventType: 'escrow' })).toBe(eventCount);
+      expect(await readCheckpoint()).toBe(latestLedger);
+    }, 120_000);
 
     it('does not process events beyond the latest ledger of the cycle', async () => {
       await setCheckpoint(100);
