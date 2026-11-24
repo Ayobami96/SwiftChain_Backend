@@ -155,6 +155,7 @@ interface EnvConfig {
   SOROBAN_ESCROW_LOCK_FUNCTION: string;
   STELLAR_BASE_FEE: number;
   STELLAR_TRANSACTION_TIMEOUT_SECONDS: number;
+  SOROBAN_STATE_CACHE_TTL_MS: number;
 
   // ── Escrow indexer ────────────────────────────────────────────
   /** Contract id the escrow indexer watches. Blank disables indexer jobs. */
@@ -402,6 +403,7 @@ const envSchema = z.object({
   SOROBAN_ESCROW_LOCK_FUNCTION: z.string().trim().min(1).default('lock_escrow'),
   STELLAR_BASE_FEE: numeric(z.coerce.number().int().min(1).default(100)),
   STELLAR_TRANSACTION_TIMEOUT_SECONDS: numeric(z.coerce.number().int().min(1).default(300)),
+  SOROBAN_STATE_CACHE_TTL_MS: z.coerce.number().int().min(0).max(300_000).default(5_000),
 
   // ── Escrow indexer ─────────────────────────────────────────────────────────
   ESCROW_CONTRACT_ID: z.string().trim().default(''),

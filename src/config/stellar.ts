@@ -29,6 +29,8 @@ export interface StellarConfig {
   escrowLockFunction: string;
   /** Base fee (in stroops) used when building transactions. */
   baseFee: string;
+  /** Time-to-live for cached Soroban contract state entries. */
+  sorobanStateCacheTtlMs: number;
   /** Validity window, in seconds, of generated unsigned transactions. */
   transactionTimeoutSeconds: number;
 }
@@ -88,6 +90,7 @@ function resolveStellarConfig(): StellarConfig {
     escrowLockFunction: env.SOROBAN_ESCROW_LOCK_FUNCTION,
     // The SDK's transaction builder expects the fee as a string.
     baseFee: String(env.STELLAR_BASE_FEE),
+    sorobanStateCacheTtlMs: env.SOROBAN_STATE_CACHE_TTL_MS,
     transactionTimeoutSeconds: env.STELLAR_TRANSACTION_TIMEOUT_SECONDS,
   };
 }
