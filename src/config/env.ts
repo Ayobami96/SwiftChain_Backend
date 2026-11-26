@@ -146,6 +146,9 @@ interface EnvConfig {
   STELLAR_NETWORK: 'mainnet' | 'testnet' | 'futurenet';
   /** Soroban RPC endpoint. Blank resolves to the default URL for the network. */
   SOROBAN_RPC_URL: string;
+  SOROBAN_RPC_URLS: string;
+  SOROBAN_RPC_PRIMARY_URL: string;
+  SOROBAN_RPC_QUARANTINE_MS: number;
   /** Network passphrase. Blank resolves to the well-known value for the network. */
   STELLAR_NETWORK_PASSPHRASE: string;
   /** Per-request HTTP timeout (ms) for Soroban RPC calls. Default: 10000 */
@@ -397,6 +400,9 @@ const envSchema = z.object({
     .pipe(z.enum(['mainnet', 'testnet', 'futurenet']))
     .default('testnet'),
   SOROBAN_RPC_URL: z.string().trim().default(''),
+  SOROBAN_RPC_URLS: z.string().trim().default(''),
+  SOROBAN_RPC_PRIMARY_URL: z.string().trim().default(''),
+  SOROBAN_RPC_QUARANTINE_MS: z.coerce.number().int().min(100).max(300_000).default(30_000),
   STELLAR_NETWORK_PASSPHRASE: z.string().trim().default(''),
   SOROBAN_RPC_TIMEOUT_MS: z.coerce.number().int().min(1000).default(10000),
   SOROBAN_ESCROW_CONTRACT_ID: z.string().trim().default(''),
