@@ -472,8 +472,12 @@ export class StellarService {
       nativeToScVal(stroops, { type: 'i128' }),
     );
 
+    const estimatedFee = estimateTransactionFee('escrow_lock', {
+      amountStroops: stroops.toString(),
+      reference: this.escrowReference(delivery),
+    });
     const transaction = new TransactionBuilder(sourceAccount, {
-      fee: stellarConfig.baseFee,
+      fee: estimatedFee,
       networkPassphrase: stellarConfig.networkPassphrase,
     })
       .addOperation(operation)
@@ -484,7 +488,8 @@ export class StellarService {
 
     logger.info(
       `[StellarService] Rebuilt XDR with fresh sequence — ` +
-        `delivery=${deliveryId} payer=${payerAddress} seq=${prepared.sequence}`,
+        `delivery=${deliveryId} payer=${payerAddress} seq=${prepared.sequence} ` +
+        `estimatedFee=${estimatedFee} appliedFee=${prepared.fee}`,
     );
 
     return prepared.toXDR();

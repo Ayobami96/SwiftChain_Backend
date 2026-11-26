@@ -200,6 +200,10 @@ export class SdkSorobanRpcClient implements ISorobanRpcClient {
     return this.server.getEvents(request);
   }
 
+  getLedgerEntries(...keys: xdr.LedgerKey[]) {
+    return this.server.getLedgerEntries(...keys);
+  }
+
   getLatestLedger() {
     return this.server.getLatestLedger();
   }
