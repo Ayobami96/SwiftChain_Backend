@@ -234,11 +234,15 @@ interface EnvConfig {
   /** Rejected wallet proofs allowed before an onboarding locks. Default: 5 */
   ONBOARDING_MAX_PROOF_ATTEMPTS: number;
 
-  // ── Proof of delivery ────────────────────────────────────────────
-  /** Maximum accepted proof-of-delivery image size, in MB. Default: 8 */
-  PROOF_OF_DELIVERY_MAX_SIZE_MB: number;
+  // ── Handoff QR security ────────────────────────────────────────────────────
+  QR_TOKEN_TTL_SECONDS: number;
+  QR_TOKEN_SECRET: string;
 
-  // ── Admin dashboard ──────────────────────────────────────────────
+  // ── Proof of delivery ──────────────────────────────────────────────────────
+  PROOF_OF_DELIVERY_MAX_SIZE_MB: number;
+  POD_ATTESTATION_SECRET: string;
+
+  // ── Admin dashboard ──────────────────────────────────────────────────────
   /** TTL (s) of the Redis cache for aggregated admin dashboard metrics. Default: 60 */
   ADMIN_DASHBOARD_CACHE_TTL_SECONDS: number;
 }
@@ -462,10 +466,15 @@ const envSchema = z.object({
   ONBOARDING_CHALLENGE_TTL_SECONDS: z.coerce.number().int().min(60).max(86400).default(900),
   ONBOARDING_MAX_PROOF_ATTEMPTS: z.coerce.number().int().min(1).max(20).default(5),
 
-  // ── Proof of delivery ────────────────────────────────────────────
-  PROOF_OF_DELIVERY_MAX_SIZE_MB: z.coerce.number().int().min(1).default(8),
+  // ── Handoff QR security ────────────────────────────────────────────────────
+  QR_TOKEN_TTL_SECONDS: numeric(z.coerce.number().int().min(1).max(86400).default(1800)),
+  QR_TOKEN_SECRET: z.string().trim().min(16).default('change_me_in_prod_change_me'),
 
-  // ── Admin dashboard ──────────────────────────────────────────────
+  // ── Proof of delivery ──────────────────────────────────────────────────────
+  PROOF_OF_DELIVERY_MAX_SIZE_MB: numeric(z.coerce.number().int().min(1).default(8)),
+  POD_ATTESTATION_SECRET: z.string().trim().min(16).default('change_me_in_prod_change_me'),
+
+  // ── Admin dashboard ──────────────────────────────────────────────────────
   /** TTL (s) of the Redis cache for aggregated admin dashboard metrics. Default: 60 */
   ADMIN_DASHBOARD_CACHE_TTL_SECONDS: numeric(z.coerce.number().int().min(1).max(86400).default(60)),
 });
