@@ -155,6 +155,11 @@ interface EnvConfig {
   SOROBAN_ESCROW_LOCK_FUNCTION: string;
   STELLAR_BASE_FEE: number;
   STELLAR_TRANSACTION_TIMEOUT_SECONDS: number;
+  SOROBAN_FEE_SAFETY_MULTIPLIER: number;
+  SOROBAN_FEE_MAX_STROOPS: number;
+  SOROBAN_FEE_ESCROW_LOCK_MULTIPLIER: number;
+  SOROBAN_FEE_CONTRACT_CALL_MULTIPLIER: number;
+  SOROBAN_FEE_CONTRACT_READ_MULTIPLIER: number;
 
   // ── Escrow indexer ────────────────────────────────────────────
   /** Contract id the escrow indexer watches. Blank disables indexer jobs. */
@@ -402,6 +407,11 @@ const envSchema = z.object({
   SOROBAN_ESCROW_LOCK_FUNCTION: z.string().trim().min(1).default('lock_escrow'),
   STELLAR_BASE_FEE: numeric(z.coerce.number().int().min(1).default(100)),
   STELLAR_TRANSACTION_TIMEOUT_SECONDS: numeric(z.coerce.number().int().min(1).default(300)),
+  SOROBAN_FEE_SAFETY_MULTIPLIER: z.coerce.number().finite().min(1).max(10).default(2),
+  SOROBAN_FEE_MAX_STROOPS: z.coerce.number().int().min(1).max(100_000_000).default(1_000_000),
+  SOROBAN_FEE_ESCROW_LOCK_MULTIPLIER: z.coerce.number().finite().min(1).max(20).default(3),
+  SOROBAN_FEE_CONTRACT_CALL_MULTIPLIER: z.coerce.number().finite().min(1).max(20).default(2),
+  SOROBAN_FEE_CONTRACT_READ_MULTIPLIER: z.coerce.number().finite().min(1).max(20).default(1),
 
   // ── Escrow indexer ─────────────────────────────────────────────────────────
   ESCROW_CONTRACT_ID: z.string().trim().default(''),
