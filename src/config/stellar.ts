@@ -81,6 +81,10 @@ function resolveStellarConfig(): StellarConfig {
     );
   }
 
+  if (env.SOROBAN_FEE_MAX_STROOPS < env.STELLAR_BASE_FEE) {
+    throw new Error('SOROBAN_FEE_MAX_STROOPS must be greater than or equal to STELLAR_BASE_FEE.');
+  }
+
   return {
     rpcUrl,
     networkPassphrase,
