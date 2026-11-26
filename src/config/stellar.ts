@@ -29,16 +29,8 @@ export interface StellarConfig {
   escrowLockFunction: string;
   /** Base fee (in stroops) used when building transactions. */
   baseFee: string;
-  /** Maximum initial transaction fee estimate (in stroops). */
-  sorobanFeeMaxStroops: number;
-  /** Safety buffer applied to the operation-specific fee estimate. */
-  sorobanFeeSafetyMultiplier: number;
-  /** Operation-specific fee multipliers. */
-  sorobanFeeMultipliers: {
-    escrowLock: number;
-    contractCall: number;
-    contractRead: number;
-  };
+  /** Time-to-live for cached Soroban contract state entries. */
+  sorobanStateCacheTtlMs: number;
   /** Validity window, in seconds, of generated unsigned transactions. */
   transactionTimeoutSeconds: number;
 }
@@ -102,13 +94,7 @@ function resolveStellarConfig(): StellarConfig {
     escrowLockFunction: env.SOROBAN_ESCROW_LOCK_FUNCTION,
     // The SDK's transaction builder expects the fee as a string.
     baseFee: String(env.STELLAR_BASE_FEE),
-    sorobanFeeMaxStroops: env.SOROBAN_FEE_MAX_STROOPS,
-    sorobanFeeSafetyMultiplier: env.SOROBAN_FEE_SAFETY_MULTIPLIER,
-    sorobanFeeMultipliers: {
-      escrowLock: env.SOROBAN_FEE_ESCROW_LOCK_MULTIPLIER,
-      contractCall: env.SOROBAN_FEE_CONTRACT_CALL_MULTIPLIER,
-      contractRead: env.SOROBAN_FEE_CONTRACT_READ_MULTIPLIER,
-    },
+    sorobanStateCacheTtlMs: env.SOROBAN_STATE_CACHE_TTL_MS,
     transactionTimeoutSeconds: env.STELLAR_TRANSACTION_TIMEOUT_SECONDS,
   };
 }

@@ -9,7 +9,7 @@
  */
 
 import axios from 'axios';
-import type { Transaction, FeeBumpTransaction, rpc as StellarRpc } from '@stellar/stellar-sdk';
+import type { Transaction, FeeBumpTransaction, rpc as StellarRpc, xdr } from '@stellar/stellar-sdk';
 import { sorobanRpcClient } from '../../config/stellar';
 import type { Coordinates, ETARequest, ETAResponse, IRoutingProvider } from './routingProvider';
 import type {
@@ -193,6 +193,10 @@ export class SdkSorobanRpcClient implements ISorobanRpcClient {
 
   getEvents(request: SorobanGetEventsRequest) {
     return this.server.getEvents(request);
+  }
+
+  getLedgerEntries(...keys: xdr.LedgerKey[]) {
+    return this.server.getLedgerEntries(...keys);
   }
 
   getLatestLedger() {
